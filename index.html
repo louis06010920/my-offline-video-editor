@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Offline Video + GIF Editor (Full)</title>
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="manifest.json" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      margin: 0;
+      padding: 16px;
+      background: #f5f5f5;
+    }
+    h1 {
+      margin-bottom: 16px;
+    }
+    #canvas {
+      border: 1px solid #ccc;
+      background: #000;
+      max-width: 800px;
+      width: 100%;
+      display: block;
+      margin: 0 auto 10px;
+    }
+    #timelineContainer {
+      position: relative;
+      width: 800px;
+      max-width: 100%;
+      margin: 0 auto 20px;
+      background: #ddd;
+      border: 1px solid #aaa;
+      user-select: none;
+      padding-bottom: 40px; /* 底部留40px給影片進度 */
+    }
+    #timeMarker {
+      position: absolute;
+      top: 0;
+      bottom: 40px;
+      width: 2px;
+      background: red;
+      pointer-events: none;
+    }
+    #videoProgress {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      height: 40px;
+      width: 100%;
+      background: #bbb;
+      cursor: pointer;
+    }
+    .track-row {
+      position: relative;
+      width: 100%;
+      height: 30px;
+      border-bottom: 1px dashed #aaa;
+      box-sizing: border-box;
+    }
+    .gif-track {
+      position: absolute;
+      top: 0; bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border: 2px solid #000;
+      background: rgba(255, 200, 0, 0.6);
+      cursor: move;
+      box-sizing: border-box;
+      padding-left: 5px;
+    }
+    .gif-track .handle {
+      width: 20px;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.2);
+      font-weight: bold;
+      cursor: ew-resize;
+    }
+    .handle-left::before { content: "<"; }
+    .handle-right::before { content: ">"; }
+
+    #giphyResults {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-top: 16px;
+    }
+    #giphyResults img {
+      width: 100px;
+      margin: 5px;
+      border: 2px solid transparent;
+      cursor: pointer;
+    }
+    #giphyResults img:hover {
+      border-color: #007bff;
+      transform: scale(1.05);
+    }
+    .btn {
+      margin: 5px;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+    #timeDisplay {
+      margin: 8px;
+      display: inline-block;
+    }
+    /* GIF 屬性面板 (一開始就顯示) */
+    #gifControlPanel {
+      border: 1px solid #aaa;
+      padding: 10px;
+      width: 340px;
+      margin: 0 auto 20px;
+    }
+    #gifControlPanel h3 {
+      margin: 0 0 10px 0;
+    }
+    .control-row {
+      display: flex;
+      align-items: center;
+      margin-bottom: 6px;
+      justify-content: center;
+    }
+    .control-row label {
+      width: 70px;
+      text-align: right;
+      margin-right: 5px;
+    }
+    .control-row input[type="range"] {
+      width: 100px;
+      margin-right: 6px;
+    }
+    .control-row input[type="number"] {
+      width: 60px;
+    }
+  </style>
+</head>
+<body>
+<h1>Offline Video + GIF Editor (Full PWA)</h1>
+
+<!-- 搜尋 GIF, 播放/暫停, 輸出 -->
+<div>
+  <input type="text" id="searchInput" placeholder="Search GIF"/>
+  <button id="searchBtn" class="btn">Search</button>
+  <div id="pagination" class="hidden">
+    <button id="prevPage" class="btn">Prev 10</button>
+    <button id="nextPage" class="btn">Next 10</button>
+  </div>
+</div>
+<input type="file" id="videoInput" accept="video/*" class="btn"/>
+<button id="playPauseBtn" class="btn">Play</button>
+<button id="exportBtn" class="btn">Export</button>
+<br/>
+<span id="timeDisplay">0:00 / 0:00</span>
+
+<!-- GIF屬性面板 (Scale(-100~100), Rotate(-360~360), Alpha(0~1)) -->
+<div id="gifControlPanel">
+  <h3>Selected GIF Props</h3>
+  <div class="control-row">
+    <label>Scale:</label>
+    <input type="range" id="scaleRange" min="-100" max="100" step="0.5" value="1"/>
+    <input type="number" id="scaleInput" min="-100" max="100" step="0.5" value="1"/>
+  </div>
+  <div class="control-row">
+    <label>Rotate:</label>
+    <input type="range" id="rotationRange" min="-360" max="360" step="1" value="0"/>
+    <input type="number" id="rotationInput" min="-360" max="360" step="1" value="0"/>
+  </div>
+  <div class="control-row">
+    <label>Alpha:</label>
+    <input type="range" id="alphaRange" min="0" max="1" step="0.05" value="1"/>
+    <input type="number" id="alphaInput" min="0" max="1" step="0.05" value="1"/>
+  </div>
+</div>
+
+<canvas id="canvas" width="800" height="450"></canvas>
+
+<div id="timelineContainer">
+  <div id="timeMarker"></div>
+  <div id="videoProgress"></div>
+</div>
+
+<div id="giphyResults" class="hidden"></div>
+
+<!-- ffmpeg-core.js 與 ffmpeg-core.wasm放在同資料夾 -->
+<script src="./ffmpeg-core.js"></script>
+<!-- 你的主程式 (以下整合在一起) -->
+<script>
+//////////////////////
+// FFmpeg 初始化 (簡化示範)
+//////////////////////
+const { createFFmpeg, fetchFile } = FFmpeg;
+let ffmpeg = createFFmpeg({ log: true });
+
+async function initFFmpeg(){
+  if(!ffmpeg.isLoaded()){
+    await ffmpeg.load();
+  }
+}
+
+//////////////////////
+// PWA: 註冊 service worker 以支援離線
+//////////////////////
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('./service-worker.js')
+  .then(reg => console.log('Service Worker registered:', reg))
+  .catch(err => console.warn('SW registration failed:', err));
+}
+
+//////////////////////
+// 編輯器邏輯 (含 Scale/Rotate/Alpha)
+//////////////////////
+let video = null;
+let isPlaying = false;
+let videoDuration = 0;
+const videoInput = document.getElementById('videoInput');
+const playPauseBtn = document.getElementById('playPauseBtn');
+const exportBtn = document.getElementById('exportBtn');
+const timeDisplay = document.getElementById('timeDisplay');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const timelineContainer = document.getElementById('timelineContainer');
+const timeMarker = document.getElementById('timeMarker');
+const videoProgress = document.getElementById('videoProgress');
+
+// scale/rotate/alpha面板 DOM
+const scaleRange = document.getElementById('scaleRange');
+const scaleInput = document.getElementById('scaleInput');
+const rotationRange = document.getElementById('rotationRange');
+const rotationInput = document.getElementById('rotationInput');
+const alphaRange = document.getElementById('alphaRange');
+const alphaInput = document.getElementById('alphaInput');
+
+// Giphy 搜尋
+const searchInput = document.getElementById('searchInput');
+const searchBtn = document.getElementById('searchBtn');
+const pagination = document.getElementById('pagination');
+const prevPageBtn = document.getElementById('prevPage');
+const nextPageBtn = document.getElementById('nextPage');
+const giphyResults = document.getElementById('giphyResults');
+let currentQuery = "";
+let currentOffset = 0;
+const limit = 10;
+const GIPHY_API_KEY = "mtJ7b8kDhfiCRNxRwK5vwF6NWr4nivpc";
+
+// GIF 清單
+// { imageObj, x, y, width, height, start, end, trackIndex, scale, rotation, alpha }
+let gifList = [];
+let trackRows = [];
+let selectedGif = null;
+
+// 初始化
+videoInput.addEventListener('change', e => {
+  const file = e.target.files[0];
+  if(!file) return;
+  video = document.createElement('video');
+  video.src = URL.createObjectURL(file);
+  video.loop = true;
+  video.play();
+  isPlaying = true;
+  playPauseBtn.textContent = "Pause";
+
+  // 影片載入後更新 canvas 大小
+  video.addEventListener('loadeddata', () => {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    videoDuration = video.duration;
+    render();
+  });
+});
+
+// 畫面渲染 (含影片與 GIF)
+function render(){
+  if(video){
+    if(!video.paused && !video.ended){
+      let ratio = video.currentTime / videoDuration;
+      updateTimeMarker(ratio);
+      updateTimeDisplay(video.currentTime, videoDuration);
+    }
+    ctx.clearRect(0,0, canvas.width, canvas.height);
+    // 畫影片
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // 畫 GIF
+    gifList.forEach(g => {
+      if(video.currentTime >= g.start && video.currentTime <= g.end){
+        ctx.save();
+
+        let actualScale = g.scale;
+        if(actualScale === 0) actualScale=0.0001; // 避免無法繪製
+        ctx.globalAlpha = g.alpha;
+
+        const drawW = g.width * Math.abs(actualScale);
+        const drawH = g.height * Math.abs(actualScale);
+        let centerX = g.x + drawW/2;
+        let centerY = g.y + drawH/2;
+
+        ctx.translate(centerX, centerY);
+        ctx.rotate(g.rotation * Math.PI/180);
+        if(actualScale < 0){
+          // scale < 0 -> 水平翻轉
+          ctx.scale(-1, 1);
+        }
+
+        ctx.translate(-drawW/2, -drawH/2);
+        ctx.drawImage(g.imageObj, 0, 0, drawW, drawH);
+
+        ctx.restore();
+      }
+    });
+  }
+  requestAnimationFrame(render);
+}
+
+function updateTimeDisplay(cur, tot){
+  let mm = Math.floor(cur/60);
+  let ss = Math.floor(cur%60);
+  let mm2= Math.floor(tot/60);
+  let ss2= Math.floor(tot%60);
+  timeDisplay.textContent= `${mm}:${ss<10?("0"+ss):ss} / ${mm2}:${ss2<10?("0"+ss2):ss2}`;
+}
+
+// Play/Pause
+playPauseBtn.addEventListener('click', ()=>{
+  if(!video) return;
+  if(isPlaying){
+    video.pause();
+    playPauseBtn.textContent = "Play";
+  } else {
+    video.play();
+    playPauseBtn.textContent = "Pause";
+  }
+  isPlaying = !isPlaying;
+});
+
+// 時間軸控制
+let isDragVideoTime = false;
+let progressRect = null;
+videoProgress.addEventListener('mousedown', e => {
+  if(!video) return;
+  progressRect = videoProgress.getBoundingClientRect();
+  isDragVideoTime = true;
+  setVideoTimeByMouse(e.clientX);
+});
+document.addEventListener('mousemove', e => {
+  if(isDragVideoTime && video) {
+    setVideoTimeByMouse(e.clientX);
+  }
+});
+document.addEventListener('mouseup', ()=>{ isDragVideoTime=false; });
+
+function setVideoTimeByMouse(mouseX){
+  if(!progressRect) return;
+  let px = mouseX - progressRect.left;
+  if(px<0) px=0;
+  if(px> progressRect.width) px= progressRect.width;
+  let ratio = px / progressRect.width;
+  video.currentTime = ratio*videoDuration;
+  video.pause();
+  isPlaying = false;
+  playPauseBtn.textContent="Play";
+  updateTimeMarker(ratio);
+}
+
+function updateTimeMarker(ratio){
+  let tw = timelineContainer.clientWidth;
+  let pos = Math.round(ratio*tw);
+  timeMarker.style.left = pos+'px';
+}
+
+// Giphy 搜尋
+searchBtn.addEventListener('click', ()=>{
+  currentQuery = searchInput.value.trim();
+  if(!currentQuery){
+    alert("請輸入關鍵字");
+    return;
+  }
+  currentOffset=0;
+  searchGiphy(currentQuery, currentOffset);
+});
+prevPageBtn.addEventListener('click', ()=>{
+  if(currentOffset>= limit){
+    currentOffset -= limit;
+    searchGiphy(currentQuery, currentOffset);
+  }
+});
+nextPageBtn.addEventListener('click', ()=>{
+  currentOffset += limit;
+  searchGiphy(currentQuery, currentOffset);
+});
+
+async function searchGiphy(query, offset){
+  giphyResults.innerHTML='Loading...';
+  giphyResults.classList.remove('hidden');
+  let url = `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_API_KEY}&q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}`;
+  try{
+    const resp= await fetch(url);
+    const data= await resp.json();
+    giphyResults.innerHTML='';
+    data.data.forEach(gifData=>{
+      const img = document.createElement('img');
+      img.src = gifData.images.fixed_width.url;
+      img.alt = gifData.title||'GIF';
+      img.addEventListener('click', ()=>{
+        let trackIndex= trackRows.length;
+        createTrackRow(trackIndex);
+
+        let gifObj = {
+          imageObj: new Image(),
+          x:50, y:50,
+          width:100, height:100,
+          start: video? video.currentTime:0,
+          end:   video? (video.currentTime+3):3,
+          trackIndex,
+          scale:1, rotation:0, alpha:1
+        };
+        gifObj.imageObj.src= gifData.images.original.url;
+        gifList.push(gifObj);
+        createGifTrack(gifObj);
+
+        alert('已加入GIF，拖曳時間軸Start/End，Canvas上可拖曳位置。Scale/Rotate/Alpha請在面板調整(需點擊GIF)。');
+      });
+      giphyResults.appendChild(img);
+    });
+    pagination.classList.remove('hidden');
+    prevPageBtn.disabled= (offset===0);
+  } catch(err){
+    console.error(err);
+    giphyResults.innerHTML='Error...';
+  }
+}
+
+// 建立多軌 row + GIF 區段
+function createTrackRow(idx){
+  let row= document.createElement('div');
+  row.classList.add('track-row');
+  timelineContainer.insertBefore(row, videoProgress);
+  trackRows.push(row);
+}
+function createGifTrack(g){
+  const track= document.createElement('div');
+  track.classList.add('gif-track');
+
+  const leftHandle= document.createElement('span');
+  leftHandle.classList.add('handle','handle-left');
+  const rightHandle= document.createElement('span');
+  rightHandle.classList.add('handle','handle-right');
+  track.appendChild(leftHandle);
+  track.appendChild(rightHandle);
+
+  trackRows[g.trackIndex].appendChild(track);
+  updateGifTrackPosition(g, track);
+
+  let isDragTrack=false, offsetX=0;
+  track.addEventListener('mousedown', e=>{
+    if(e.target.classList.contains('handle')) return;
+    isDragTrack=true;
+    offsetX= e.offsetX;
+    e.stopPropagation();
+  });
+  document.addEventListener('mousemove', e=>{
+    if(!isDragTrack) return;
+    let rowRect= trackRows[g.trackIndex].getBoundingClientRect();
+    let mouseX= e.clientX- rowRect.left- offsetX;
+    if(mouseX<0) mouseX=0;
+    let trackLen= (g.end-g.start)/videoDuration * rowRect.width;
+    if(mouseX+trackLen> rowRect.width) mouseX= rowRect.width-trackLen;
+    let startRatio= mouseX/ rowRect.width;
+    let dur= g.end-g.start;
+    g.start= startRatio*videoDuration;
+    g.end= g.start+ dur;
+    updateGifTrackPosition(g, track);
+  });
+  document.addEventListener('mouseup', ()=>{ isDragTrack=false; });
+
+  // 左右把手
+  let isDragLeft=false;
+  leftHandle.addEventListener('mousedown', e=>{
+    isDragLeft= true; e.stopPropagation();
+  });
+  document.addEventListener('mousemove', e=>{
+    if(!isDragLeft) return;
+    let rowRect= trackRows[g.trackIndex].getBoundingClientRect();
+    let mouseX= e.clientX- rowRect.left;
+    if(mouseX<0) mouseX=0;
+    if(mouseX>rowRect.width) mouseX= rowRect.width;
+    let newStart= (mouseX/rowRect.width)*videoDuration;
+    if(newStart>= g.end) newStart= g.end-0.1;
+    if(newStart<0) newStart=0;
+    g.start= newStart;
+    updateGifTrackPosition(g, track);
+  });
+  document.addEventListener('mouseup', ()=>{ isDragLeft=false; });
+
+  let isDragRight=false;
+  rightHandle.addEventListener('mousedown', e=>{
+    isDragRight=true; e.stopPropagation();
+  });
+  document.addEventListener('mousemove', e=>{
+    if(!isDragRight) return;
+    let rowRect= trackRows[g.trackIndex].getBoundingClientRect();
+    let mouseX= e.clientX- rowRect.left;
+    if(mouseX<0) mouseX=0;
+    if(mouseX>rowRect.width) mouseX= rowRect.width;
+    let newEnd= (mouseX/rowRect.width)*videoDuration;
+    if(newEnd<= g.start) newEnd= g.start+0.1;
+    if(newEnd> videoDuration) newEnd= videoDuration;
+    g.end= newEnd;
+    updateGifTrackPosition(g, track);
+  });
+  document.addEventListener('mouseup', ()=>{ isDragRight=false; });
+}
+
+function updateGifTrackPosition(g, track){
+  let rowRect= trackRows[g.trackIndex].getBoundingClientRect();
+  let totalW= rowRect.width;
+  let startPx= (g.start/videoDuration)* totalW;
+  let endPx= (g.end/videoDuration)* totalW;
+  track.style.left= Math.round(startPx)+'px';
+  track.style.width= Math.round(endPx- startPx)+'px';
+}
+
+// Canvas 上拖曳 & 選取 => Update selectedGif
+let isDraggingGif=false, dragOffsetX=0, dragOffsetY=0;
+canvas.addEventListener('mousedown', e=>{
+  if(!video) return;
+  const rect= canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height/ rect.height;
+  const mx= (e.clientX - rect.left)* scaleX;
+  const my= (e.clientY - rect.top )* scaleY;
+
+  let foundGif=null;
+  for(let i= gifList.length-1; i>=0; i--){
+    let gif= gifList[i];
+    if(video.currentTime>= gif.start && video.currentTime<= gif.end){
+      let actualScale= gif.scale || 1;
+      if(actualScale===0) actualScale=0.0001;
+      let drawW= gif.width * Math.abs(actualScale);
+      let drawH= gif.height* Math.abs(actualScale);
+      if(mx>= gif.x && mx<= gif.x+ drawW && my>= gif.y && my<= gif.y+ drawH){
+        foundGif= gif;
+        gifList.splice(i,1);
+        gifList.push(gif);
+        break;
+      }
+    }
+  }
+
+  if(foundGif){
+    isDraggingGif= true;
+    selectedGif= foundGif;
+    dragOffsetX= mx - selectedGif.x;
+    dragOffsetY= my - selectedGif.y;
+    showGifProps(selectedGif);
+  } else {
+    selectedGif= null;
+    clearGifProps();
+  }
+});
+canvas.addEventListener('mousemove', e=>{
+  if(!isDraggingGif || !selectedGif) return;
+  const rect= canvas.getBoundingClientRect();
+  const scaleX= canvas.width/ rect.width;
+  const scaleY= canvas.height/ rect.height;
+  const mx= (e.clientX - rect.left)* scaleX;
+  const my= (e.clientY - rect.top )* scaleY;
+  selectedGif.x= mx - dragOffsetX;
+  selectedGif.y= my - dragOffsetY;
+});
+document.addEventListener('mouseup', ()=>{
+  isDraggingGif=false;
+});
+
+// 顯示/同步 GIF 屬性
+function showGifProps(gif){
+  scaleRange.value = gif.scale.toString();
+  scaleInput.value = gif.scale.toString();
+  rotationRange.value = gif.rotation.toString();
+  rotationInput.value = gif.rotation.toString();
+  alphaRange.value = gif.alpha.toString();
+  alphaInput.value = gif.alpha.toString();
+}
+function clearGifProps(){
+  scaleRange.value = "1"; scaleInput.value="1";
+  rotationRange.value="0"; rotationInput.value="0";
+  alphaRange.value="1"; alphaInput.value="1";
+}
+
+// scale / rotate / alpha => slider + input
+scaleRange.addEventListener('input', e=>{
+  if(!selectedGif) return;
+  let val= parseFloat(e.target.value);
+  selectedGif.scale= val;
+  scaleInput.value= val;
+});
+scaleInput.addEventListener('change', e=>{
+  if(!selectedGif) return;
+  let val= parseFloat(e.target.value);
+  if(isNaN(val)) val=0;
+  if(val<-100) val=-100;
+  if(val>100) val=100;
+  selectedGif.scale= val;
+  scaleRange.value= val.toString();
+});
+
+rotationRange.addEventListener('input', e=>{
+  if(!selectedGif) return;
+  let val= parseFloat(e.target.value);
+  selectedGif.rotation= val;
+  rotationInput.value= val;
+});
+rotationInput.addEventListener('change', e=>{
+  if(!selectedGif) return;
+  let val= parseFloat(e.target.value);
+  if(isNaN(val)) val=0;
+  if(val<-360) val=-360;
+  if(val>360) val=360;
+  selectedGif.rotation= val;
+  rotationRange.value= val.toString();
+});
+
+alphaRange.addEventListener('input', e=>{
+  if(!selectedGif) return;
+  let val= parseFloat(e.target.value);
+  selectedGif.alpha= val;
+  alphaInput.value= val;
+});
+alphaInput.addEventListener('change', e=>{
+  if(!selectedGif) return;
+  let val= parseFloat(e.target.value);
+  if(isNaN(val)) val=1;
+  if(val<0) val=0;
+  if(val>1) val=1;
+  selectedGif.alpha= val;
+  alphaRange.value= val.toString();
+});
+
+// Export => 目前只處理 x,y,start,end
+exportBtn.addEventListener('click', async ()=>{
+  if(!video){
+    alert("請先上傳影片！");
+    return;
+  }
+  await initFFmpeg();
+
+  // 把 input.mp4 寫入 FS
+  const resp= await fetch(video.src);
+  const videoBlob= await resp.blob();
+  ffmpeg.FS('writeFile','input.mp4', await fetchFile(videoBlob));
+
+  // 把所有 GIF 也寫進 FS
+  for(let i=0; i< gifList.length; i++){
+    let g= gifList[i];
+    let gifResp= await fetch(g.imageObj.src);
+    let gifBlob= await gifResp.blob();
+    ffmpeg.FS('writeFile', `gif${i}.gif`, await fetchFile(gifBlob));
+  }
+
+  // 動態產生 filter_complex
+  let filterStr= `[0:v] setpts=PTS-STARTPTS [base];`;
+  let lastMap= "[base]";
+  let inputArgs= ['-i','input.mp4'];
+  gifList.forEach((g,i)=>{
+    inputArgs.push('-i', `gif${i}.gif`);
+  });
+
+  let idx=1;
+  gifList.forEach((g,i)=>{
+    let inMap= `[${idx}:v]`;
+    let outMap= `[v${idx}]`;
+    idx++;
+    let x= Math.floor(g.x), y= Math.floor(g.y);
+    let st= g.start, ed= g.end;
+    filterStr += `${lastMap}${inMap} overlay=${x}:${y}:enable='between(t,${st},${ed})'${outMap};`;
+    lastMap= outMap;
+  });
+
+  let ffmpegArgs= [
+    ...inputArgs,
+    '-filter_complex', filterStr,
+    '-map', lastMap,
+    '-map','0:a?',
+    '-c:v','libx264',
+    '-c:a','copy',
+    'output.mp4'
+  ];
+  console.log("FFmpeg command:", ffmpegArgs.join(" "));
+
+  try{
+    await ffmpeg.run(...ffmpegArgs);
+    let data= ffmpeg.FS('readFile','output.mp4');
+    let outBlob= new Blob([data.buffer], {type:'video/mp4'});
+    let url= URL.createObjectURL(outBlob);
+    let a= document.createElement('a');
+    a.href= url;
+    a.download= "exported_video.mp4";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    alert("匯出完成！（暫不支援scale/rotation/alpha）");
+  } catch(e){
+    console.error(e);
+    alert("匯出失敗，請看console！ => " + e);
+  }
+});
+
+</script>
+</body>
+</html>
